@@ -3,11 +3,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 import yaml
-from gym_sokoban.envs.room_utils import generate_room
-
-from vagen.envs.sokoban.patch_sokoban_env import (
+from vagen.envs.sokoban.ragen_engine import (
     _room_matches_partition,
     _room_partition_bucket,
+    generate_room,
     get_shortest_action_path,
 )
 from vagen.envs.sokoban.sokoban_env import SokobanEnvConfig
@@ -93,8 +92,9 @@ def test_validation_seed_manifest_is_unique_and_in_the_eval_partition():
     fingerprints = set()
     for seed in seeds:
         with set_seed(seed):
-            fixed, state, _ = generate_room(
-                dim=(6, 6), num_steps=20, num_boxes=1, second_player=False
+            fixed, state, _, _ = generate_room(
+                dim=(6, 6), num_steps=20, num_boxes=1, second_player=False,
+                search_depth=300,
             )
         assert 1 <= len(get_shortest_action_path(fixed, state, MAX_DEPTH=200)) <= 5
         assert _room_matches_partition(fixed, state, "eval", 4, 0)

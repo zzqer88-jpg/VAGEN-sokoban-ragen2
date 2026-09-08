@@ -4,7 +4,7 @@ import os
 import subprocess
 import sys
 
-from vagen.envs.sokoban.patch_sokoban_env import _next_retry_seed
+from vagen.envs.sokoban.ragen_engine import _next_retry_seed
 
 
 def test_retry_seed_is_a_stable_32_bit_sequence():
@@ -25,7 +25,7 @@ def test_retry_seed_is_a_stable_32_bit_sequence():
 
 def test_retry_seed_does_not_depend_on_python_hash_randomization():
     code = (
-        "from vagen.envs.sokoban.patch_sokoban_env import _next_retry_seed; "
+        "from vagen.envs.sokoban.ragen_engine import _next_retry_seed; "
         "print(_next_retry_seed(10001))"
     )
     outputs = []

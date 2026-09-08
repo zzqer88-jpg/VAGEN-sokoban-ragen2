@@ -2,7 +2,7 @@ import numpy as np
 from PIL import Image
 
 # from gym_sokoban.envs.sokoban_env import SokobanEnv
-from vagen.envs.sokoban.patch_sokoban_env import PatchedSokobanEnv as SokobanEnv
+from vagen.envs.sokoban.ragen_engine import RagenSokobanEngine as SokobanEnv
 from vagen.envs.sokoban.utils.prompt import (
     action_template,
     format_prompt,
@@ -32,6 +32,7 @@ class SokobanEnvConfig:
     max_steps: int = 100      # Maximum steps per episode
     num_boxes: int = 1        # Number of boxes in the room
     render_mode: str = "text" # "text" or "vision"
+    observation_format: str = "grid"  # text observation layout: "grid", "coord", or "grid_coord" (RAGEN formats)
     max_actions_per_step: int = 3  # Max actions per step
     action_sep: str = ","     # Separator between actions
     image_placeholder: str = "<image>"  # Placeholder for vision mode
@@ -41,6 +42,7 @@ class SokobanEnvConfig:
     min_solution_steps: Optional[Tuple[int, int]] = None  # (min, max) range for solution steps
     reset_seed_max_tries: int = 10000  # Max tries to find a valid seed
     min_solution_bfs_max_depth: int = 200  # Max BFS depth for solution
+    search_depth: int = 300  # RAGEN-2 reverse-play search depth for room generation
     map_partition: Optional[str] = None
     map_partition_modulus: int = 4
     map_partition_eval_bucket: int = 0
@@ -73,6 +75,12 @@ class SokobanEnvConfig:
         """
         self.format_reward = float(self.format_reward)
         self.success_reward = float(self.success_reward)
+        if self.observation_format not in {"grid", "coord", "grid_coord"}:
+            raise ValueError(
+                "observation_format must be 'grid', 'coord', or 'grid_coord', "
+                f"got {self.observation_format!r}"
+            )
+        self.search_depth = int(self.search_depth)
         for name in ("map_partition_modulus", "map_partition_eval_bucket"):
             value = getattr(self, name)
             if isinstance(value, (float, np.floating)) and not float(value).is_integer():
@@ -133,6 +141,7 @@ class Sokoban(GymImageEnv, HasStateReward):
             dim_room=self.config.dim_room,
             max_steps=self.config.max_steps,
             num_boxes=self.config.num_boxes,
+            search_depth=self.config.search_depth,
         )
         self.total_reward: float = 0.0
         self.valid_actions: List[str] = []
@@ -298,8 +307,15 @@ class Sokoban(GymImageEnv, HasStateReward):
             multi_modal_input = {
                 self.config.image_placeholder: [numpy_to_pil(rgb_array)]
             }
-        else:
+        elif self.config.observation_format == "grid":
             img_str = self._grid_to_text()
+        else:
+            # RAGEN-2 text layouts: pure coordinate list, optionally with the
+            # compact grid map appended. The spaced grid above stays the
+            # default -- prompts and trained checkpoints expect it.
+            img_str = await asyncio.to_thread(
+                self.env.render, self.config.observation_format
+            )
 
         if init_obs:
             obs_str = init_observation_template(img_str) + "\n" #+ format_prompt_str
@@ -350,7 +366,8 @@ if __name__ == "__main__":
                          save_path: str = "./test",
                          min_solution_steps: Tuple[int, int] = (1, 5),
                          reset_seed_max_tries: int = 10000,
-                         min_solution_bfs_max_depth: int = 100
+                         min_solution_bfs_max_depth: int = 100,
+                         search_depth: int = 300
                         ):
         cfg = {
             "render_mode": render_mode,
@@ -360,8 +377,9 @@ if __name__ == "__main__":
             "min_solution_steps": min_solution_steps,
             "reset_seed_max_tries": reset_seed_max_tries,
             "min_solution_bfs_max_depth": min_solution_bfs_max_depth,
+            "search_depth": search_depth,
             "prompt_format": "free_think",
-            
+
         }
         env = Sokoban(cfg)
 

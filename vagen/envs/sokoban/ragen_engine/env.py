@@ -1,12 +1,39 @@
-import hashlib
-from gym_sokoban.envs.sokoban_env import SokobanEnv
-from gym.utils import seeding
-from gym_sokoban.envs.room_utils import generate_room
-from .utils.seeding import set_seed
-import numpy as np
-from collections import deque
-import marshal
+"""Sokoban engine with RAGEN-2 room generation, adapted to VAGEN.
+
+Room generation and the coordinate text renders are vendored from RAGEN
+(github.com/mll-lab-nu/RAGEN, ragen/env/sokoban/, main @ d97bb32).  Like both
+RAGEN's SokobanEnv and the PatchedSokobanEnv this replaces, step() dynamics
+and rgb rendering are inherited unchanged from
+gym_sokoban.envs.sokoban_env.SokobanEnv; only reset() and text rendering
+differ.
+
+Deliberate divergences from the RAGEN original (kept from the VAGEN patch
+this replaces):
+
+* The reset retry walk uses the deterministic LCG ``_next_retry_seed``
+  instead of ``abs(hash(str(seed))) % 2**32``.  Python's ``hash`` is salted
+  per interpreter, so RAGEN's fallback maps the same dataset seed to
+  different rooms in different Ray workers (see ``_next_retry_seed``).
+* Seeding uses vagen.envs.sokoban.utils.seeding.set_seed, which seeds
+  ``random`` and ``numpy.random`` -- the two RNGs generate_room draws from --
+  instead of ragen.utils.all_seed (which additionally seeds torch).
+* Room acceptance keeps VAGEN's BFS difficulty gate (min_solution_steps)
+  and the sha256 train/eval map partition on top of RAGEN's generator.
+"""
 import copy
+import hashlib
+import marshal
+from collections import deque
+
+import numpy as np
+from gym_sokoban.envs.sokoban_env import SokobanEnv
+
+from vagen.envs.sokoban.utils.seeding import set_seed
+from .utils import (
+    collect_entity_coordinates,
+    format_coordinate_render,
+    generate_room,
+)
 
 
 def _next_retry_seed(seed: int | None) -> int | None:
@@ -116,7 +143,41 @@ def get_shortest_action_path(room_fixed: np.ndarray, room_state: np.ndarray, MAX
 
     return []
 
-class PatchedSokobanEnv(SokobanEnv):
+
+class RagenSokobanEngine(SokobanEnv):
+    """gym_sokoban engine with RAGEN-2's room generator and text renders.
+
+    The VAGEN-facing contract is unchanged from PatchedSokobanEnv: the outer
+    vagen.envs.sokoban.sokoban_env.Sokoban reads ``room_fixed`` /
+    ``room_state`` / ``player_position`` / ``boxes_on_target`` / ``num_boxes``,
+    calls ``step(action_int)`` and ``render("rgb_array")``, and drives
+    ``reset`` with the difficulty/partition gates below.
+    """
+
+    # Compact grid lookup for RAGEN-style text renders. NOTE: the VAGEN
+    # observation keeps its own spaced grid (" # ", " _ ", ...) for
+    # prompt/model compatibility; this lookup is only used by
+    # render("grid")/("grid_coord").
+    GRID_LOOKUP = {
+        0: "#",  # wall
+        1: "_",  # floor
+        2: "O",  # target
+        3: "√",  # box on target
+        4: "X",  # box
+        5: "P",  # player
+        6: "S",  # player on target
+    }
+
+    def __init__(self, dim_room=(6, 6), max_steps=100, num_boxes=3, search_depth=300):
+        # Set before super().__init__(): gym_sokoban's constructor calls
+        # self.reset() (reset=True default), which already needs the depth.
+        self.search_depth = search_depth
+        super().__init__(
+            dim_room=dim_room,
+            max_steps=max_steps,
+            num_boxes=num_boxes,
+        )
+
     def reset(
         self,
         second_player=False,
@@ -129,34 +190,36 @@ class PatchedSokobanEnv(SokobanEnv):
         map_partition_modulus=4,
         map_partition_eval_bucket=0,
     ):
-        
         find_solution = False
         action_seq_len = 0
         for _try in range(reset_seed_max_tries):
             try:
                 with set_seed(seed):
-                    self.room_fixed, self.room_state, self.box_mapping = generate_room(
+                    # RAGEN-2 generator: reverse-play DFS bounded by
+                    # search_depth, then random player repositioning.
+                    self.room_fixed, self.room_state, self.box_mapping, _reverse_actions = generate_room(
                         dim=self.dim_room,
                         num_steps=self.num_gen_steps,
                         num_boxes=self.num_boxes,
-                        second_player=second_player
+                        second_player=second_player,
+                        search_depth=self.search_depth,
                     )
-                    action_seq=get_shortest_action_path(self.room_fixed,self.room_state,MAX_DEPTH=min_solution_bfs_max_depth)
-                    action_seq_len = len(action_seq)
-                    difficulty_matches = (
-                        min_solution_steps is None
-                        or min_solution_steps[0] <= action_seq_len <= min_solution_steps[1]
-                    )
-                    partition_matches = _room_matches_partition(
-                        self.room_fixed,
-                        self.room_state,
-                        map_partition,
-                        int(map_partition_modulus),
-                        int(map_partition_eval_bucket),
-                    )
-                    if difficulty_matches and partition_matches:
-                        find_solution=True
-                        break
+                action_seq = get_shortest_action_path(self.room_fixed, self.room_state, MAX_DEPTH=min_solution_bfs_max_depth)
+                action_seq_len = len(action_seq)
+                difficulty_matches = (
+                    min_solution_steps is None
+                    or min_solution_steps[0] <= action_seq_len <= min_solution_steps[1]
+                )
+                partition_matches = _room_matches_partition(
+                    self.room_fixed,
+                    self.room_state,
+                    map_partition,
+                    int(map_partition_modulus),
+                    int(map_partition_eval_bucket),
+                )
+                if difficulty_matches and partition_matches:
+                    find_solution = True
+                    break
             except (RuntimeError, RuntimeWarning) as e:
                 print("[SOKOBAN] Runtime Error/Warning: {}".format(e))
                 print("[SOKOBAN] Retry . . .")
@@ -168,7 +231,7 @@ class PatchedSokobanEnv(SokobanEnv):
                     f"after {reset_seed_max_tries} attempts"
                 )
             print(f"Max tries reached: {reset_seed_max_tries}, using map with action seq len {action_seq_len}")
-                
+
         self.player_position = np.argwhere(self.room_state == 5)[0]
         self.num_env_steps = 0
         self.reward_last = 0
@@ -176,3 +239,27 @@ class PatchedSokobanEnv(SokobanEnv):
 
         starting_observation = self.render(render_mode)
         return starting_observation
+
+    # ------------------------------
+    # RAGEN-2 text rendering
+    # ------------------------------
+    def render(self, mode=None):
+        if mode in {"grid", "coord", "grid_coord"}:
+            return self._render_text(mode)
+        return super().render(mode if mode is not None else "rgb_array")
+
+    def _render_text(self, observation_format: str) -> str:
+        if observation_format == "grid":
+            room = np.where((self.room_state == 5) & (self.room_fixed == 2), 6, self.room_state)
+            return "\n".join("".join(self.GRID_LOOKUP.get(int(cell), "?") for cell in row) for row in room.tolist())
+        if observation_format == "coord":
+            entity_coords = collect_entity_coordinates(self.room_state, self.room_fixed)
+            return format_coordinate_render(entity_coords, self.dim_room)
+        if observation_format == "grid_coord":
+            entity_coords = collect_entity_coordinates(self.room_state, self.room_fixed)
+            return "Coordinates: \n" + format_coordinate_render(entity_coords, self.dim_room) + "\n" + "Grid Map: \n" + self._render_text("grid")
+        raise ValueError(f"Invalid observation_format: {observation_format}")
+
+    def get_all_actions(self):
+        """RAGEN parity helper: action ints accepted by step()."""
+        return [1, 2, 3, 4]
