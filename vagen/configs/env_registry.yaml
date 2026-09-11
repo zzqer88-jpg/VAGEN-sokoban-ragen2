@@ -1,6 +1,7 @@
 env_registry:
   # Local environments
   Sokoban: vagen.envs.sokoban.sokoban_env.Sokoban
+  SokobanStateModeling: sokoban_state_modeling.env.sokoban_state_env.SokobanStateModelingEnv
   FrozenLake: vagen.envs.frozenlake.frozenlake_env.FrozenLake
   SpatialGym: vagen.envs.spatial_gym.spatial_gym_env.SpatialGym
   PrimitiveSkill: vagen.envs.primitive_skill.primitive_skill_env.PrimitiveSkillEnv

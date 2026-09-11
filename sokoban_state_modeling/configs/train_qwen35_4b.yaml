@@ -1,0 +1,14 @@
+envs:
+  - name: SokobanStateModeling
+    n_envs: 50000
+    data_source: sokoban_state_modeling_train
+    seed: [0, 49999, 1]
+    max_turns: 1
+    response_length_per_turn: 512
+    max_env_response_per_turn: 32
+    stop_strings: ["</prediction>"]
+    config:
+      manifest_path: ${oc.env:SOKOBAN_STATE_TRAIN_MANIFEST}
+      manifest_index_path: ${oc.env:SOKOBAN_STATE_TRAIN_INDEX}
+      reward_profile: ${oc.env:SOKOBAN_STATE_REWARD_PROFILE,dense}
+      verify_manifest_rows: true

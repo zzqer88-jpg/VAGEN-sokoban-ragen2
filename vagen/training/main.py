@@ -412,11 +412,25 @@ def create_rl_sampler(data_config, dataset):
     Returns:
         sampler (Sampler): The sampler.
     """
+    import importlib
     import torch
     from torch.utils.data import SequentialSampler
 
     # torch.utils.data.RandomSampler could not recover properly
     from torchdata.stateful_dataloader.sampler import RandomSampler
+
+    sampler_config = data_config.get("sampler", None)
+    if sampler_config and sampler_config.get("class_path", None):
+        class_path = str(sampler_config.class_path)
+        module_name, class_name = class_path.rsplit(".", 1)
+        sampler_cls = getattr(importlib.import_module(module_name), class_name)
+        kwargs = {
+            key: value for key, value in sampler_config.items()
+            if key != "class_path"
+        }
+        kwargs.setdefault("batch_size", int(data_config.train_batch_size))
+        kwargs.setdefault("seed", int(data_config.get("seed", 0) or 0))
+        return sampler_cls(data_source=dataset, **kwargs)
 
     # Use a sampler to facilitate checkpoint resumption.
     # If shuffling is enabled in the data configuration, create a random sampler.

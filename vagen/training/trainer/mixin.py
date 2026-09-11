@@ -362,6 +362,66 @@ class VagenLogicMixin:
             self.metrics.update(
                 collect_registry_metrics(METRIC_REGISTRY, batch, prefix="custom_metrics/train")
             )
+            self._vagen_collect_conditional_prediction_metric(batch)
+            self._vagen_collect_sampler_metrics()
+
+    def _vagen_reward_extra_values(self, batch, key: str) -> list[float]:
+        non_tensor = getattr(batch, "non_tensor_batch", {}) or {}
+        if key in non_tensor:
+            return [float(value) for value in non_tensor[key]]
+        rows = non_tensor.get("reward_extra_info", [])
+        return [float(row[key]) for row in rows if isinstance(row, dict) and key in row]
+
+    def _vagen_collect_conditional_prediction_metric(self, batch) -> None:
+        numerators = self._vagen_reward_extra_values(
+            batch, "conditional_prediction_success_numerator"
+        )
+        denominators = self._vagen_reward_extra_values(
+            batch, "conditional_prediction_success_denominator"
+        )
+        if not numerators and not denominators:
+            return
+        numerator, denominator = float(np.nansum(numerators)), float(np.nansum(denominators))
+        self.metrics["custom_metrics/train/conditional_prediction_success_rate"] = (
+            numerator / denominator if denominator else float("nan")
+        )
+
+    def _vagen_collect_sampler_metrics(self) -> None:
+        loader = getattr(self, "train_dataloader", None)
+        sampler = getattr(loader, "sampler", None)
+        if sampler is None:
+            sampler = getattr(getattr(loader, "batch_sampler", None), "sampler", None)
+        stats = getattr(sampler, "coverage_stats", None)
+        if not callable(stats):
+            return
+        for name, value in stats().items():
+            self.metrics[f"custom_metrics/train/{name}"] = float(value)
+
+    def _vagen_fix_conditional_validation_metrics(self) -> None:
+        """A ratio of sums, expressed as ratio of equal-row-count means.
+
+        verl has already reduced validation extras when this runs. Numerator and
+        denominator were reduced over the same rows, so mean(n)/mean(d) is exactly
+        sum(n)/sum(d), unlike mean of per-row conditional placeholders.
+        """
+        for key, numerator in list(self.metrics.items()):
+            if "conditional_prediction_success_numerator" not in key:
+                continue
+            denominator_key = key.replace(
+                "conditional_prediction_success_numerator",
+                "conditional_prediction_success_denominator",
+            )
+            if denominator_key not in self.metrics:
+                continue
+            denominator = float(self.metrics[denominator_key])
+            rate_key = key.replace(
+                "conditional_prediction_success_numerator",
+                "conditional_prediction_success_rate",
+            )
+            self.metrics[rate_key] = float(numerator) / denominator if denominator else float("nan")
+            # These are aggregation terms, not user-facing metrics.
+            self.metrics.pop(key, None)
+            self.metrics.pop(denominator_key, None)
 
     def _vagen_rescope_row_metrics_to_episodes(self) -> None:
         """Report episode-level quantities per episode, not per row.
@@ -574,6 +634,7 @@ class VagenV0Mixin(VagenLogicMixin):
         nothing logged.
         """
         out = super()._fit_validate(*args, **kwargs)
+        self._vagen_fix_conditional_validation_metrics()
         logger_ = getattr(self, "_vagen_val_logger", None)
         if logger_ is not None:
             logger_.flush()

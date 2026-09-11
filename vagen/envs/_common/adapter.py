@@ -62,8 +62,20 @@ class GymEnvAdapter:
         self.turns_seen = 0
         self.turns_well_formed = 0
         self.reports_format = False
+        self.reward_metric_names = tuple(getattr(env, "REWARD_METRIC_NAMES", ()))
+        self.public_reward_metric_names = tuple(
+            getattr(env, "PUBLIC_REWARD_METRIC_NAMES", self.reward_metric_names)
+        )
+        self.reward_metrics: dict[str, float] = {
+            name: 0.0 for name in self.reward_metric_names
+        }
+        self.reward_metric_error = 0.0
 
     async def reset(self, seed=None):
+        self.reward_metrics = {name: 0.0 for name in self.reward_metric_names}
+        self.reward_metric_error = 0.0
+        if seed is None:
+            seed = self.kwargs.get("seed")
         obs, info = await self.env.reset(seed=seed)
         return self._message(obs), info
 
@@ -100,7 +112,12 @@ class GymEnvAdapter:
             logger.error("environment %r failed on action %r: %s", self.env_name, action, exc)
             # Ends the episode rather than pretending the step happened. Reported as
             # terminated, since there is no state left to bootstrap from.
-            return self._message({"obs_str": "Environment Error"}), 0.0, True, False, {"env_error": True}
+            self.reward_metric_error = 1.0
+            self.reward_metrics = {name: float("nan") for name in self.reward_metric_names}
+            return self._message({"obs_str": "Environment Error"}), 0.0, True, False, {
+                "env_error": True,
+                "reward_metrics": dict(self.reward_metrics),
+            }
 
         self.success = extract_success(info)
         for key in self.state_scores:
@@ -109,6 +126,15 @@ class GymEnvAdapter:
             self.reports_format = True
             self.turns_seen += 1
             self.turns_well_formed += bool(info["format_correct"])
+        reported_metrics = (info or {}).get("reward_metrics", {}) or {}
+        for name in self.reward_metric_names:
+            # Missing declared keys are scoring errors, not model failures. Preserve a
+            # stable schema and make the failure visible rather than converting it to 0.
+            if name not in reported_metrics:
+                self.reward_metrics[name] = float("nan")
+                self.reward_metric_error = 1.0
+            else:
+                self.reward_metrics[name] = float(reported_metrics[name])
         # An environment that stopped because it ran out of turns says so through
         # `info["truncated"]` (see vagen/envs/turn_limit.py). Truncated and terminated are
         # not interchangeable: the first should bootstrap from V, the second must not.
@@ -127,6 +153,18 @@ class GymEnvAdapter:
             if callable(finalize)
             else dict(self.state_scores)
         )
+
+    def finalized_reward_metrics(self) -> dict[str, float]:
+        return {
+            **self.reward_metrics,
+            "reward_metric_error": self.reward_metric_error,
+        } if self.reward_metric_names else {}
+
+    def finalized_public_reward_metrics(self) -> dict[str, float]:
+        return {
+            name: self.reward_metrics.get(name, float("nan"))
+            for name in self.public_reward_metric_names
+        }
 
     @property
     def state_reward_aggregation(self) -> str:
